@@ -10,23 +10,28 @@ import SwiftUI
 struct Container {
     static let shared = Container()
 
-    let apiService: NetworkInitiable
+    let apiService: any NetworkInitiable
+    // here we would add more services as we need them, for example:
+    // analytics, branch io, user defaults, keychain,
+    // core-data store, task schedulers, other persistent stores,
+    // api service, BT manager, df/deep-link service, location service,
+    // notification center, push notif manager, logger etc
 
     private init(
-        apiService: NetworkInitiable = ApiService.shared
+        apiService: any NetworkInitiable = ApiService(urlSession: Utility.makeURLSession())
     ) {
         self.apiService = apiService
     }
 }
 
-// MARK: Use the mock container for tests and canvas previews; for more customization use the factory function mock
 extension Container {
     static var mock: Container {
         makeMockContainer()
     }
 
     static func makeMockContainer(
-        apiService: NetworkInitiable = MockApiService(result: .failure(.unknown))
+        // apiService: any NetworkInitiable = MockApiService(result: .failure(.unknown))
+        apiService: any NetworkInitiable = ApiService(urlSession: Utility.makeURLSession())
     ) -> Container {
         Container(
             apiService: apiService
