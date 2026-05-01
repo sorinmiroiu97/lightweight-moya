@@ -9,6 +9,11 @@ import Combine
 import Foundation
 
 protocol NetworkInitiable: AnyObject {
+
+    var urlSession: URLSessionInitiable { get }
+
+    init(urlSession: URLSessionInitiable)
+
     // MARK: callback based api
 
     func perform<T: Decodable>(

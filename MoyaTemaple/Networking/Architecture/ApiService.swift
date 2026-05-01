@@ -9,24 +9,20 @@ import Combine
 import Foundation
 
 final class ApiService: NetworkInitiable, ObservableObject {
-    static let shared = ApiService()
 
-    private let sessionConfig: URLSessionConfiguration = {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 100
-        return config
-    }()
+    let urlSession: any URLSessionInitiable
 
-    private init() {
-        // empty implementation
+    required init(urlSession: any URLSessionInitiable) {
+        self.urlSession = urlSession
     }
+
+    // MARK: callback based api
 
     func perform<T: Decodable>(
         request: URLRequest,
         with completion: @escaping ((Result<T, ApiError>) -> Void)
     ) {
-        URLSession(configuration: sessionConfig)
+        urlSession
             .dataTask(with: request) { [weak self] data, response, error in
                 guard let self else {
                     completion(.failure(ApiError.unknown))
@@ -61,7 +57,7 @@ final class ApiService: NetworkInitiable, ObservableObject {
         body: Data,
         with completion: @escaping ((Result<T, ApiError>) -> Void)
     ) {
-        URLSession(configuration: sessionConfig)
+        urlSession
             .uploadTask(with: request, from: body) { [weak self] data, response, error in
                 guard let self else {
                     completion(.failure(ApiError.unknown))
@@ -89,36 +85,13 @@ final class ApiService: NetworkInitiable, ObservableObject {
             }.resume()
     }
 
-    func perform<T: Decodable>(
-        request: URLRequest
-    ) async throws -> T {
-        do {
-            let (data, response) = try await URLSession(configuration: sessionConfig)
-                .data(for: request)
-            return try decode(data: data, from: response, with: request)
-        } catch {
-            throw ApiError.error(error: error)
-        }
-    }
-
-    func uploadData<T: Decodable>(
-        request: URLRequest,
-        body: Data
-    ) async throws -> T {
-        do {
-            let (data, response) = try await URLSession(configuration: sessionConfig)
-                .upload(for: request, from: body)
-            return try decode(data: data, from: response, with: request)
-        } catch {
-            throw ApiError.error(error: error)
-        }
-    }
+    // MARK: publisher based api
 
     func requestPublisher<T: Decodable>(
         with request: URLRequest,
         for type: T.Type
     ) -> AnyPublisher<T, ApiError> {
-        URLSession(configuration: sessionConfig)
+        urlSession
             .dataTaskPublisher(for: request)
         // since url sessions tasks run on the background thread
         // there's no need to explicitly subscribe on the background thread
@@ -151,35 +124,105 @@ final class ApiService: NetworkInitiable, ObservableObject {
                 promise(.failure(ApiError.unknown))
                 return
             }
-            URLSession(configuration: self.sessionConfig)
-                .uploadTask(with: request, from: body) { [weak self] data, response, error in
-                    guard let self else {
-                        promise(.failure(ApiError.unknown))
-                        return
-                    }
-                    if let error {
-                        promise(.failure(ApiError.error(error: error)))
-                        return
-                    }
-                    guard let data,
-                          let response else {
-                        promise(.failure(ApiError.invalidRequest))
-                        return
-                    }
-                    do {
-                        let decoded: T = try self.decode(data: data, from: response, with: request)
-                        promise(.success(decoded))
-                    } catch {
-                        if let error = error as? ApiError {
-                            promise(.failure(error))
-                        } else {
-                            promise(.failure(ApiError.error(error: error)))
-                        }
-                    }
-                }.resume()
+            self.uploadData(
+                request: request,
+                body: body
+            ) { (result: Result<T, ApiError>) in
+                switch result {
+                case .success(let decodedData):
+                    promise(.success(decodedData))
+                case .failure(let error):
+                    promise(.failure(error))
+                }
+            }
         }
         .receive(on: DispatchQueue.main)
         .eraseToAnyPublisher()
+    }
+
+    // MARK: async/await based api
+
+    func perform<T: Decodable>(
+        request: URLRequest
+    ) async throws -> T {
+        if #available(iOS 15, *) {
+            try await asyncPerform(request: request)
+        } else {
+            try await backportedAsyncPerform(request: request)
+        }
+    }
+
+    func uploadData<T: Decodable>(
+        request: URLRequest,
+        body: Data
+    ) async throws -> T {
+        if #available(iOS 15, *) {
+            try await asyncUploadData(request: request, body: body)
+        } else {
+            try await backportedAsyncUploadData(request: request, body: body)
+        }
+    }
+}
+
+// MARK: Async/Await functions
+
+extension ApiService {
+    @available(iOS 15, *)
+    func asyncPerform<T: Decodable>(
+        request: URLRequest
+    ) async throws -> T {
+        do {
+            let (data, response) = try await urlSession
+                .data(for: request, delegate: nil)
+            return try decode(data: data, from: response, with: request)
+        } catch {
+            throw ApiError.error(error: error)
+        }
+    }
+
+    func backportedAsyncPerform<T: Decodable>(
+        request: URLRequest
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            perform(request: request) { (result: Result<T, ApiError>) in
+                switch result {
+                case .success(let value):
+                    continuation.resume(returning: value)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    @available(iOS 15, *)
+    func asyncUploadData<T: Decodable>(
+        request: URLRequest,
+        body: Data
+    ) async throws -> T {
+        do {
+            let (data, response) = try await urlSession
+                .upload(for: request, from: body, delegate: nil)
+            return try decode(data: data, from: response, with: request)
+        } catch {
+            throw ApiError.error(error: error)
+        }
+    }
+
+    func backportedAsyncUploadData<T: Decodable>(
+        request: URLRequest,
+        body: Data
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            uploadData(request: request, body: body) { (result: Result<T, ApiError>) in
+                switch result {
+                case .success(let value):
+                    continuation.resume(returning: value)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 }
 
